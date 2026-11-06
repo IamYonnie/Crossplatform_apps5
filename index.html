@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+  <title>AR: управление 3D-объектами</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: #eeeeee;
+      overflow: hidden;
+    }
+
+    canvas { display: block; }
+
+    #start-panel {
+      position: absolute;
+      top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(255, 255, 255, 0.92);
+      display: flex; flex-direction: column;
+      justify-content: center; align-items: center;
+      z-index: 100;
+      text-align: center;
+      padding: 20px; box-sizing: border-box;
+    }
+
+    #ar-ui {
+      position: absolute;
+      bottom: 0; left: 0; width: 100%;
+      padding: 15px;
+      box-sizing: border-box;
+      display: none;
+      justify-content: center;
+      gap: 10px;
+      z-index: 50;
+      pointer-events: none;
+    }
+    #ar-ui.active { display: flex; }
+
+    .ar-btn {
+      padding: 12px 20px;
+      font-size: 14px;
+      font-weight: bold;
+      background: rgba(30, 30, 30, 0.85);
+      color: #fff;
+      border: 1px solid rgba(255,255,255,0.3);
+      border-radius: 25px;
+      cursor: pointer;
+      backdrop-filter: blur(5px);
+      pointer-events: auto;
+    }
+    .ar-btn:active { background: rgba(66,133,244,0.9); }
+
+    #status {
+      position: absolute; top: 20px; left: 20px; right: 20px;
+      text-align: center; color: #333; font-weight: bold;
+      pointer-events: none; z-index: 10;
+    }
+    #ar-ui.active ~ #status {
+      color: #fff;
+      background: rgba(0,0,0,0.5);
+      padding: 8px 16px;
+      border-radius: 20px;
+      left: 50%; transform: translateX(-50%);
+      width: max-content; right: auto;
+    }
+  </style>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="start-panel">
+    <h1>Размещение собачек в AR</h1>
+    <p>Наведите камеру на поверхность. Когда появится кольцо, коснитесь экрана, чтобы добавить объект.</p>
+    <button id="start" disabled>Загрузка...</button>
+    <p id="status"></p>
+  </div>
+
+  <div id="ar-ui">
+    <button class="ar-btn" id="btn-color">Цвет</button>
+    <button class="ar-btn" id="btn-rotate">Вращать</button>
+    <button class="ar-btn" id="btn-model">Модель</button>
+  </div>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
+
+    // === КЛАСС: Управление моделями и объектами ===
+    class ObjectManager {
+      constructor(scene) {
+        this.scene = scene;
+        this.loader = new GLTFLoader();
+        this.placedObjects = [];
+        
+        this.colors = [0xffffff, 0xff7a3d, 0x4285f4, 0x34a853];
+        this.currentColorIndex = 0;
+        this.isRotating = false;
+        
+        // Старая собака + две новые
+        this.models = [
+          './chihuahua_derp_dog.glb',
+          './dog_idle.glb',
+          './hot_dog_stylized.glb'
+        ];
+        this.currentModelIndex = 0;
+        this.templates = {};
+      }
+
+      async preloadModels() {
+        const promises = this.models.map(url => {
+          return new Promise((resolve, reject) => {
+            this.loader.load(url, (gltf) => {
+              const model = gltf.scene;
+              
+              const box = new THREE.Box3().setFromObject(model);
+              const size = box.getSize(new THREE.Vector3());
+              const maxSize = Math.max(size.x, size.y, size.z);
+              if (maxSize > 0) model.scale.setScalar(0.35 / maxSize);
+              
+              box.setFromObject(model);
+              const center = box.getCenter(new THREE.Vector3());
+              model.position.x -= center.x;
+              model.position.y -= box.min.y;
+              model.position.z -= center.z;
+              
+              this.templates[url] = model;
+              resolve();
+            }, undefined, reject);
+          });
+        });
+        await Promise.all(promises);
+      }
+
+      placeObject(matrix) {
+        const url = this.models[this.currentModelIndex];
+        if (!this.templates[url]) return;
+
+        const object = new THREE.Group();
+        const position = new THREE.Vector3();
+        const quaternion = new THREE.Quaternion();
+        const scale = new THREE.Vector3();
+        
+        matrix.decompose(position, quaternion, scale);
+        
+        object.position.copy(position);
+        object.quaternion.copy(quaternion);
+        object.scale.set(1, 1, 1);
+        
+        object.add(this.templates[url].clone(true));
+        
+        this.scene.add(object);
+        this.placedObjects.push(object);
+      }
+
+      changeColor() {
+        this.currentColorIndex = (this.currentColorIndex + 1) % this.colors.length;
+        const newColor = this.colors[this.currentColorIndex];
+        
+        this.placedObjects.forEach(obj => {
+          obj.traverse(child => {
+            if (child.isMesh && child.material) {
+              if (Array.isArray(child.material)) {
+                child.material.forEach(m => m.color && m.color.setHex(newColor));
+              } else if (child.material.color) {
+                child.material.color.setHex(newColor);
+              }
+            }
+          });
+        });
+      }
+
+      toggleRotation() {
+        this.isRotating = !this.isRotating;
+      }
+
+      changeModel() {
+        this.currentModelIndex = (this.currentModelIndex + 1) % this.models.length;
+        
+        // Удаляем старые объекты, чтобы не было мешанины
+        this.placedObjects.forEach(obj => this.scene.remove(obj));
+        this.placedObjects = [];
+      }
+
+      update(delta) {
+        if (this.isRotating) {
+          this.placedObjects.forEach(obj => {
+            obj.children.forEach(child => child.rotation.y += delta * 2);
+          });
+        }
+      }
+    }
+
+    class ARApp {
+      constructor() {
+        this.button = document.getElementById('start');
+        this.status = document.getElementById('status');
+        this.startPanel = document.getElementById('start-panel');
+        this.arUi = document.getElementById('ar-ui');
+
+        this.scene = new THREE.Scene();
+        this.camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.01, 100);
+        this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        this.renderer.setSize(innerWidth, innerHeight);
+        this.renderer.xr.enabled = true;
+        this.renderer.xr.setReferenceSpaceType('local-floor');
+        document.body.appendChild(this.renderer.domElement);
+
+        this.objectManager = new ObjectManager(this.scene);
+        
+        this.marker = new THREE.Mesh(
+          new THREE.RingGeometry(0.07, 0.09, 32).rotateX(-Math.PI / 2),
+          new THREE.MeshBasicMaterial({ color: 0x00cc88, side: THREE.DoubleSide })
+        );
+        this.marker.matrixAutoUpdate = false;
+        this.marker.visible = false;
+        this.scene.add(this.marker);
+
+        this.clock = new THREE.Clock();
+        this.hitTestSource = null;
+        this.referenceSpace = null;
+        this.lastPlacement = -Infinity;
+
+        this.setupLighting();
+        this.setupUI();
+        this.checkSupport();
+        this.startLoop();
+      }
+
+      setupLighting() {
+        this.scene.add(new THREE.HemisphereLight(0xffffff, 0x555555, 1.0));
+        
+        new RGBELoader().load(
+          'https://threejs.org/examples/textures/equirectangular/royal_esplanade_1k.hdr',
+          (texture) => {
+            texture.mapping = THREE.EquirectangularReflectionMapping;
+            this.scene.environment = texture;
+          }
+        );
+      }
+
+      setupUI() {
+        document.getElementById('btn-color').addEventListener('click', () => this.objectManager.changeColor());
+        document.getElementById('btn-rotate').addEventListener('click', () => this.objectManager.toggleRotation());
+        document.getElementById('btn-model').addEventListener('click', () => {
+          this.objectManager.changeModel();
+          this.status.textContent = 'Модель изменена. Коснитесь экрана для размещения.';
+        });
+
+        this.button.addEventListener('click', () => this.startAR());
+
+        const handleTap = (e) => {
+          if (this.startPanel.contains(e.target) || this.arUi.contains(e.target)) return;
+          this.tryPlace();
+        };
+        this.renderer.domElement.addEventListener('click', handleTap);
+      }
+
+      async checkSupport() {
+        if (!window.isSecureContext) {
+          this.button.textContent = 'Нужен HTTPS';
+          this.status.textContent = 'Откройте сайт через HTTPS или localhost.';
+          return;
+        }
+        if (!navigator.xr) {
+          this.button.textContent = 'WebXR недоступен';
+          this.status.textContent = 'Проверьте настройки браузера.';
+          return;
+        }
+
+        try {
+          const supported = await navigator.xr.isSessionSupported('immersive-ar');
+          this.button.disabled = !supported;
+          this.button.textContent = supported ? 'Запустить AR' : 'AR не поддерживается';
+          
+          if (supported) {
+            await this.objectManager.preloadModels();
+            this.button.textContent = 'Запустить AR';
+          }
+        } catch (e) {
+          this.button.textContent = 'Ошибка проверки';
+          this.status.textContent = e.message;
+        }
+      }
+
+      async startAR() {
+        this.button.disabled = true;
+        this.status.textContent = 'Запуск...';
+
+        try {
+          const session = await navigator.xr.requestSession('immersive-ar', {
+            requiredFeatures: ['hit-test'],
+            optionalFeatures: ['local-floor', 'dom-overlay'],
+            domOverlay: { root: document.body }
+          });
+
+          session.addEventListener('end', () => this.onSessionEnd(), { once: true });
+
+          await this.renderer.xr.setSession(session);
+          
+          await new Promise(r => requestAnimationFrame(r));
+          this.referenceSpace = this.renderer.xr.getReferenceSpace();
+          
+          if (!this.referenceSpace) {
+            this.referenceSpace = await session.requestReferenceSpace('local-floor');
+          }
+
+          const viewerSpace = await session.requestReferenceSpace('viewer');
+          this.hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
+
+          this.startPanel.style.display = 'none';
+          this.arUi.classList.add('active');
+          this.status.textContent = 'Наведите на поверхность и коснитесь экрана';
+          
+          session.addEventListener('select', () => this.tryPlace());
+
+        } catch (error) {
+          this.button.disabled = false;
+          this.button.textContent = 'Ошибка запуска';
+          this.status.textContent = error.name + ': ' + error.message;
+        }
+      }
+
+      onSessionEnd() {
+        this.hitTestSource = null;
+        this.referenceSpace = null;
+        this.marker.visible = false;
+        
+        this.objectManager.placedObjects.forEach(obj => this.scene.remove(obj));
+        this.objectManager.placedObjects = [];
+        
+        this.startPanel.style.display = 'flex';
+        this.arUi.classList.remove('active');
+        this.button.disabled = false;
+        this.button.textContent = 'Запустить AR';
+      }
+
+      tryPlace() {
+        if (!this.renderer.xr.isPresenting || !this.marker.visible) return;
+        
+        const now = performance.now();
+        if (now - this.lastPlacement < 250) return;
+        this.lastPlacement = now;
+
+        this.objectManager.placeObject(this.marker.matrix);
+      }
+
+      startLoop() {
+        this.renderer.setAnimationLoop((time, frame) => {
+          const delta = this.clock.getDelta();
+          
+          this.objectManager.update(delta);
+
+          this.marker.visible = false;
+          if (frame && this.hitTestSource && this.referenceSpace) {
+            const results = frame.getHitTestResults(this.hitTestSource);
+            if (results.length > 0) {
+              const pose = results[0].getPose(this.referenceSpace);
+              if (pose) {
+                this.marker.matrix.fromArray(pose.transform.matrix);
+                this.marker.matrixWorldNeedsUpdate = true;
+                this.marker.visible = true;
+              }
+            }
+          }
+
+          this.renderer.render(this.scene, this.camera);
+        });
+      }
+    }
+
+    try {
+      new ARApp();
+    } catch (error) {
+      document.getElementById('status').textContent = 'Критическая ошибка: ' + error.message;
+      console.error(error);
+    }
+
+    window.addEventListener('resize', () => {
+    });
+  </script>
+</body>
+</html>
