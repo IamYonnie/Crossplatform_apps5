@@ -85,9 +85,9 @@
   </div>
 
   <div id="ar-ui">
-    <button class="ar-btn" id="btn-color">Цвет</button>
-    <button class="ar-btn" id="btn-rotate">Вращать</button>
-    <button class="ar-btn" id="btn-model">Модель</button>
+    <button class="ar-btn" id="btn-color">🎨 Цвет</button>
+    <button class="ar-btn" id="btn-rotate">🔄 Вращать</button>
+    <button class="ar-btn" id="btn-model">📦 Модель</button>
   </div>
 
   <script type="module">
@@ -101,6 +101,7 @@
         this.scene = scene;
         this.loader = new GLTFLoader();
         this.placedObjects = [];
+        this.activeObject = null; // Текущий выбранный объект
         
         this.colors = [0xffffff, 0xff7a3d, 0x4285f4, 0x34a853];
         this.currentColorIndex = 0;
@@ -141,6 +142,31 @@
         await Promise.all(promises);
       }
 
+      // Выбрать активный объект
+      setActive(obj) {
+        // Снимаем подсветку со всех
+        this.placedObjects.forEach(o => {
+          o.userData.isActive = false;
+          o.traverse(child => {
+            if (child.isMesh && child.material && child.material.emissive) {
+              child.material.emissive.setHex(0x000000);
+            }
+          });
+        });
+        
+        this.activeObject = obj;
+        
+        if (obj) {
+          obj.userData.isActive = true;
+          // Лёгкая подсветка активного объекта
+          obj.traverse(child => {
+            if (child.isMesh && child.material && child.material.emissive) {
+              child.material.emissive.setHex(0x222222);
+            }
+          });
+        }
+      }
+
       placeObject(matrix) {
         const url = this.models[this.currentModelIndex];
         if (!this.templates[url]) return;
@@ -157,25 +183,30 @@
         object.scale.set(1, 1, 1);
         
         object.add(this.templates[url].clone(true));
+        object.userData.isActive = false;
+        object.userData.modelUrl = url;
         
         this.scene.add(object);
         this.placedObjects.push(object);
+        
+        // Новый объект сразу становится активным
+        this.setActive(object);
       }
 
       changeColor() {
+        if (!this.activeObject) return;
+        
         this.currentColorIndex = (this.currentColorIndex + 1) % this.colors.length;
         const newColor = this.colors[this.currentColorIndex];
         
-        this.placedObjects.forEach(obj => {
-          obj.traverse(child => {
-            if (child.isMesh && child.material) {
-              if (Array.isArray(child.material)) {
-                child.material.forEach(m => m.color && m.color.setHex(newColor));
-              } else if (child.material.color) {
-                child.material.color.setHex(newColor);
-              }
+        this.activeObject.traverse(child => {
+          if (child.isMesh && child.material) {
+            if (Array.isArray(child.material)) {
+              child.material.forEach(m => m.color && m.color.setHex(newColor));
+            } else if (child.material.color) {
+              child.material.color.setHex(newColor);
             }
-          });
+          }
         });
       }
 
@@ -184,22 +215,22 @@
       }
 
       changeModel() {
+        // Меняем шаблон для следующего размещения. Существующие объекты НЕ трогаем.
         this.currentModelIndex = (this.currentModelIndex + 1) % this.models.length;
-        
-        // Удаляем старые объекты, чтобы не было мешанины
-        this.placedObjects.forEach(obj => this.scene.remove(obj));
-        this.placedObjects = [];
+        return this.models[this.currentModelIndex];
       }
 
       update(delta) {
-        if (this.isRotating) {
-          this.placedObjects.forEach(obj => {
-            obj.children.forEach(child => child.rotation.y += delta * 2);
+        // Вращаем ТОЛЬКО активный объект
+        if (this.isRotating && this.activeObject) {
+          this.activeObject.children.forEach(child => {
+            child.rotation.y += delta * 2;
           });
         }
       }
     }
 
+    // === КЛАСС: Приложение AR ===
     class ARApp {
       constructor() {
         this.button = document.getElementById('start');
@@ -231,6 +262,12 @@
         this.referenceSpace = null;
         this.lastPlacement = -Infinity;
 
+        // Для выбора объекта тапом
+        this.raycaster = new THREE.Raycaster();
+        this.controller = this.renderer.xr.getController(0);
+        this.controller.addEventListener('select', () => this.onSelect());
+        this.scene.add(this.controller);
+
         this.setupLighting();
         this.setupUI();
         this.checkSupport();
@@ -250,20 +287,44 @@
       }
 
       setupUI() {
-        document.getElementById('btn-color').addEventListener('click', () => this.objectManager.changeColor());
-        document.getElementById('btn-rotate').addEventListener('click', () => this.objectManager.toggleRotation());
+        document.getElementById('btn-color').addEventListener('click', () => {
+          this.objectManager.changeColor();
+          this.status.textContent = 'Цвет изменён у активного объекта';
+        });
+        
+        document.getElementById('btn-rotate').addEventListener('click', () => {
+          this.objectManager.toggleRotation();
+          this.status.textContent = this.objectManager.isRotating 
+            ? 'Вращение включено (только активный объект)' 
+            : 'Вращение выключено';
+        });
+        
         document.getElementById('btn-model').addEventListener('click', () => {
-          this.objectManager.changeModel();
-          this.status.textContent = 'Модель изменена. Коснитесь экрана для размещения.';
+          const nextModel = this.objectManager.changeModel();
+          this.status.textContent = `Следующий объект будет: ${nextModel.split('/').pop()}. Коснитесь экрана для размещения.`;
         });
 
         this.button.addEventListener('click', () => this.startAR());
 
-        const handleTap = (e) => {
+        // Тап по экрану: сначала пробуем выбрать объект, если не попали — размещаем
+        this.renderer.domElement.addEventListener('click', (e) => {
           if (this.startPanel.contains(e.target) || this.arUi.contains(e.target)) return;
-          this.tryPlace();
-        };
-        this.renderer.domElement.addEventListener('click', handleTap);
+          this.onSelect();
+        });
+
+        // Горячие клавиши для эмулятора
+        window.addEventListener('keydown', (e) => {
+          if (!this.renderer.xr.isPresenting) return;
+          switch(e.key.toLowerCase()) {
+            case 'c': this.objectManager.changeColor(); break;
+            case 'r': this.objectManager.toggleRotation(); break;
+            case 'm': 
+              const m = this.objectManager.changeModel(); 
+              this.status.textContent = `Следующий объект: ${m.split('/').pop()}`;
+              break;
+            case 'escape': this.renderer.xr.getSession()?.end(); break;
+          }
+        });
       }
 
       async checkSupport() {
@@ -320,9 +381,7 @@
 
           this.startPanel.style.display = 'none';
           this.arUi.classList.add('active');
-          this.status.textContent = 'Наведите на поверхность и коснитесь экрана';
-          
-          session.addEventListener('select', () => this.tryPlace());
+          this.status.textContent = 'Тапни по поверхности — разместить. Тапни по объекту — выбрать. Кнопки: C/R/M/Esc';
 
         } catch (error) {
           this.button.disabled = false;
@@ -336,8 +395,11 @@
         this.referenceSpace = null;
         this.marker.visible = false;
         
+        // Очищаем всё при выходе
         this.objectManager.placedObjects.forEach(obj => this.scene.remove(obj));
         this.objectManager.placedObjects = [];
+        this.objectManager.activeObject = null;
+        this.objectManager.isRotating = false;
         
         this.startPanel.style.display = 'flex';
         this.arUi.classList.remove('active');
@@ -345,14 +407,48 @@
         this.button.textContent = 'Запустить AR';
       }
 
-      tryPlace() {
+      // Главный обработчик выбора: либо выбрать объект, либо разместить новый
+      onSelect() {
         if (!this.renderer.xr.isPresenting || !this.marker.visible) return;
         
-        const now = performance.now();
-        if (now - this.lastPlacement < 250) return;
-        this.lastPlacement = now;
+        // Пробуем найти объект под лучом из центра экрана
+        const hitObject = this.pickObjectAtCenter();
+        
+        if (hitObject) {
+          // Если попали в объект — делаем его активным
+          this.objectManager.setActive(hitObject);
+          this.status.textContent = 'Объект выбран. Вращение/цвет применяются к нему.';
+        } else {
+          // Иначе размещаем новый
+          const now = performance.now();
+          if (now - this.lastPlacement < 250) return;
+          this.lastPlacement = now;
+          this.objectManager.placeObject(this.marker.matrix);
+          this.status.textContent = 'Объект размещён и выбран.';
+        }
+      }
 
-        this.objectManager.placeObject(this.marker.matrix);
+      // Поиск объекта под центральным лучом камеры
+      pickObjectAtCenter() {
+        // Луч из центра экрана в мировых координатах
+        const camera = this.renderer.xr.getCamera();
+        const tempMatrix = new THREE.Matrix4();
+        tempMatrix.identity().extractRotation(camera.matrixWorld);
+        
+        this.raycaster.ray.origin.setFromMatrixPosition(camera.matrixWorld);
+        this.raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
+        
+        const intersects = this.raycaster.intersectObjects(this.objectManager.placedObjects, true);
+        
+        if (intersects.length > 0) {
+          // Находим корневой Group (размещённый объект)
+          let obj = intersects[0].object;
+          while (obj.parent && !this.objectManager.placedObjects.includes(obj)) {
+            obj = obj.parent;
+          }
+          if (this.objectManager.placedObjects.includes(obj)) return obj;
+        }
+        return null;
       }
 
       startLoop() {
@@ -385,9 +481,6 @@
       document.getElementById('status').textContent = 'Критическая ошибка: ' + error.message;
       console.error(error);
     }
-
-    window.addEventListener('resize', () => {
-    });
   </script>
 </body>
 </html>
