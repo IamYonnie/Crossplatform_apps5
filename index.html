@@ -101,7 +101,7 @@
         this.scene = scene;
         this.loader = new GLTFLoader();
         this.placedObjects = [];
-        this.activeObject = null; // Текущий выбранный объект
+        this.activeObject = null;
         
         this.colors = [0xffffff, 0xff7a3d, 0x4285f4, 0x34a853];
         this.currentColorIndex = 0;
@@ -123,11 +123,13 @@
             this.loader.load(url, (gltf) => {
               const model = gltf.scene;
               
+              // Нормализация размера (все модели ~35 см)
               const box = new THREE.Box3().setFromObject(model);
               const size = box.getSize(new THREE.Vector3());
               const maxSize = Math.max(size.x, size.y, size.z);
               if (maxSize > 0) model.scale.setScalar(0.35 / maxSize);
               
+              // Центровка по X/Z и постановка на пол по Y
               box.setFromObject(model);
               const center = box.getCenter(new THREE.Vector3());
               model.position.x -= center.x;
@@ -142,7 +144,6 @@
         await Promise.all(promises);
       }
 
-      // Выбрать активный объект
       setActive(obj) {
         // Снимаем подсветку со всех
         this.placedObjects.forEach(o => {
@@ -182,7 +183,20 @@
         object.quaternion.copy(quaternion);
         object.scale.set(1, 1, 1);
         
-        object.add(this.templates[url].clone(true));
+        // Клонируем модель и ОБЯЗАТЕЛЬНО клонируем материалы,
+        // чтобы цвет одного объекта не влиял на другие
+        const modelClone = this.templates[url].clone(true);
+        modelClone.traverse(child => {
+          if (child.isMesh && child.material) {
+            if (Array.isArray(child.material)) {
+              child.material = child.material.map(m => m.clone());
+            } else {
+              child.material = child.material.clone();
+            }
+          }
+        });
+        
+        object.add(modelClone);
         object.userData.isActive = false;
         object.userData.modelUrl = url;
         
@@ -199,6 +213,7 @@
         this.currentColorIndex = (this.currentColorIndex + 1) % this.colors.length;
         const newColor = this.colors[this.currentColorIndex];
         
+        // Красим ТОЛЬКО активный объект
         this.activeObject.traverse(child => {
           if (child.isMesh && child.material) {
             if (Array.isArray(child.material)) {
@@ -430,7 +445,6 @@
 
       // Поиск объекта под центральным лучом камеры
       pickObjectAtCenter() {
-        // Луч из центра экрана в мировых координатах
         const camera = this.renderer.xr.getCamera();
         const tempMatrix = new THREE.Matrix4();
         tempMatrix.identity().extractRotation(camera.matrixWorld);
@@ -441,7 +455,6 @@
         const intersects = this.raycaster.intersectObjects(this.objectManager.placedObjects, true);
         
         if (intersects.length > 0) {
-          // Находим корневой Group (размещённый объект)
           let obj = intersects[0].object;
           while (obj.parent && !this.objectManager.placedObjects.includes(obj)) {
             obj = obj.parent;
